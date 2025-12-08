@@ -70,7 +70,7 @@ class Gun(Entity):
 
         self.mag_size = 30        # bullets per mag
         self.mag = self.mag_size  # current mag
-        self.reserve = 120        # bullets left in inventory
+        self.reserve = 60       # bullets left in inventory
         self.reloading = False
 
         self._orig_rotation_z = self.rotation_z
@@ -260,6 +260,14 @@ player_hp_text = Text(
     scale=2,
     color=color.red
 )
+# --- Controls Text ---
+controls_text = Text(
+    text="W/A/S/D - Move\nMOUSE - Look\nLEFT CLICK - Shoot\nR - Reload\nSPACE - Jump\nESC - Quit",
+    origin=(0, 0),
+    position=(-0.72, -0.39),
+    scale=1,
+    color=color.white
+)
 # --- Trees ---
 trees = []
 for pos in [(39, 0, 39), (-39, 0, -39), (39, 0, -39), (-39, 0, 39)]:
@@ -391,20 +399,17 @@ was_on_ground = player.grounded
 
 
 class Enemy(Entity):
-    def __init__(self, **kwargs):
+    def __init__(self, speed_multiplier=1.0, **kwargs):
         super().__init__(
             parent=shootables_parent,
             model='egg_drone.glb',
-            scale_y=1,
-            origin_y=-2,
+            scale_y=1.4,
+            origin_y=-1.6,
             color=color.light_gray,
             scale=(1, 1, 1),
             collider='box',
             **kwargs
         )
-
-        self.collider = BoxCollider(
-            self, center=Vec3(0, 1, 0), size=Vec3(1, 2, 1))
 
         self.health_bar = Entity(
             parent=self,
@@ -420,6 +425,7 @@ class Enemy(Entity):
 
         self.destroyed = False
         self.attack_cooldown = 0
+        self.speed_multiplier = speed_multiplier
 
     def update(self):
         if self.destroyed:
@@ -430,7 +436,7 @@ class Enemy(Entity):
         # --- SAFE MOVE ---
         if dist > 1.4:
             self.look_at_2d(player.position, axis='y')
-            self.position += self.forward * time.dt * 1.3
+            self.position += self.forward * time.dt * 1.3 * self.speed_multiplier
         else:
             self.look_at_2d(player.position, axis='y')
 
@@ -469,13 +475,22 @@ class Enemy(Entity):
             self.enabled = False
             destroy(self, delay=.05)
 
+            # Spawn 2 more enemies with increased speed
+            spawn_new_enemies = [
+                Enemy(position=self.position + Vec3(random.uniform(-12, 12), 0, random.uniform(-12, 12)),
+                      speed_multiplier=self.speed_multiplier + 0.8),
+                Enemy(position=self.position + Vec3(random.uniform(-12, 12), 0, random.uniform(-12, 12)),
+                      speed_multiplier=self.speed_multiplier + 0.8)
+            ]
+            enemies.extend(spawn_new_enemies)
+
         self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
         self.health_bar.alpha = 1
 
 
 # Spawn Enemies
-enemies = [Enemy(position=(x * -5, 0, 46)) for x in range(4)]
-random.shuffle(enemies)
+enemies = [Enemy(position=(random.uniform(-40, 40), 0,
+                 random.uniform(30, 46))) for x in range(4)]
 
 
 # ======================================================
@@ -603,5 +618,7 @@ def input(key):
     if key == 'r':
         gun.reload()
 
+
+input_handler = Entity(ignore_paused=True, input=input)
 
 app.run()
