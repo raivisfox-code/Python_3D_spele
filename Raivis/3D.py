@@ -5,6 +5,7 @@ from ursina.prefabs.first_person_controller import FirstPersonController
 import random
 import math
 
+
 app = Ursina()
 ammo_pickups = []
 shootables_parent = Entity()
@@ -189,6 +190,12 @@ class Gun(Entity):
 
     def _reset_cooldown(self):
         self.on_cooldown = False
+
+    def add_ammo(self, amount):
+        self.reserve += amount
+        pickup_sound.play()
+        update_ammo_ui()
+        print(f"Picked up {amount} ammo! Reserve = {self.reserve}")
 
 
 # ======================================================
@@ -472,26 +479,43 @@ random.shuffle(enemies)
 
 
 # ======================================================
-
-
 class AmmoBox(Entity):
-    def __init__(self, amount=30, **kwargs):
+    def __init__(self, amount=120, **kwargs):
         super().__init__(
             model='ammo_box_-_game_asset.glb',
-            color=color.azure,
+            color=color.white,
             scale=1,
             collider='box',
+            parent=scene,
             **kwargs
         )
         self.amount = amount
-        ammo_pickups.append(self)
+
+
+# Spawn Ammo Boxes
+b = AmmoBox(position=(49, 8, 50))
+a = AmmoBox(position=(-49, 8, 50))
+ammo_pickups.append(b)
+ammo_pickups.append(a)
+
 
 # ======================================================
 #  UPDATE LOOP
 # ======================================================
+def drop_ammo(position):
+    box = AmmoBox(position=position + Vec3(0, 0.5, 0), amount=120)
+    ammo_pickups.append(box)
 
 
 def update():
+    # ---- Check Ammo PICKUP ----
+    for box in ammo_pickups[:]:    # copy list for safe removal
+        if distance(player.position, box.position) < 2:
+            gun.add_ammo(box.amount)
+            destroy(box)
+            ammo_pickups.remove(box)
+            pickup_sound.play()
+
     for i, block in enumerate(blocks):
 
         # --- Move block ---
@@ -530,29 +554,6 @@ def update():
     if held_keys['left mouse'] and not gun.reloading:
         gun.shoot()
 
-        # ---- Ammo pickup ----
-    for box in ammo_pickups[:]:
-        if distance(player.position, box.position) < 2:
-
-            # add ammo
-            gun.reserve += box.amount
-
-            # update UI if you use it
-            try:
-                ammo_text.text = f"{gun.mag} / {gun.reserve}"
-            except:
-                pass
-
-            # play sound
-            try:
-                pickup_sound.play()
-            except:
-                print("take-it-90781.mp3")
-
-            # destroy box and remove from list
-            destroy(box)
-            ammo_pickups.remove(box)
-
 
 # --- Player HP System ---
 player.max_hp = 100
@@ -576,6 +577,7 @@ def update_player_hp():
         application.pause()
         destroy(player)
 
+
 #  PAUSE
 # ======================================================
 
@@ -595,7 +597,7 @@ pause_handler = Entity(ignore_paused=True, input=pause_input)
 
 
 def input(key):
-    if key == 'q':
+    if key == 'escape':
         quit()
 
     if key == 'r':
