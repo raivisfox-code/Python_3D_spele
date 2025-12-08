@@ -2,9 +2,13 @@ from ursina.prefabs.health_bar import HealthBar
 import random
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
-
+import random
+import math
 
 app = Ursina()
+ammo_pickups = []
+shootables_parent = Entity()
+
 
 # Configuration
 WALL_HEIGHT = 8
@@ -16,21 +20,28 @@ BLOCK_UPDATE_DISTANCE = 50
 random.seed(0)
 window.vsync = True
 
+# =====================================================
+# PLAYER
+# =====================================================
+player = FirstPersonController(speed=PLAYER_SPEED, position=(0, 0, -30))
+player.cursor.visible = True
 
 # ======================================================
 #  DAMAGE FLOATING TEXT
 # ======================================================
+
+
 class DamageText(Text):
     def __init__(self, value, position):
         super().__init__(
             text=f"-{value}",
             color=color.red,
             position=position,
-            scale=10,
-            origin=(8, 8),
+            scale=2,  # smaller scale
+            origin=(0, 0),  # center origin
             world_parent=scene
         )
-        self.animate_position(self.position + Vec3(1, 1, 1), duration=1)
+        self.animate_position(self.position + Vec3(0, 1, 0), duration=1)
         self.fade_out(duration=1)
         destroy(self, delay=1.1)
 
@@ -51,7 +62,6 @@ class Gun(Entity):
             flip_faces=True,
             **kwargs
         )
-
         # === Shooting system ===
         self.on_cooldown = False
         self.cooldown_time = 0.12
@@ -67,11 +77,12 @@ class Gun(Entity):
         # Barrel offset
         self.barrel_offset = Vec3(1.5, 3.7, 5.5)
 
+        # Replace quad with .glb muzzle flash
         self.muzzle_flash = Entity(
             parent=self,
-            model='quad',
+            model='muzzle_meshes.glb',  # .glb file here
             color=color.yellow,
-            world_scale=0.03,
+            scale=0.001,                # adjust scale as needed
             enabled=False,
             position=self.barrel_offset
         )
@@ -79,9 +90,17 @@ class Gun(Entity):
         self.gunshot = Audio('single-gunshot-54-40780.mp3',
                              volume=0.8, autoplay=False)
 
+    def _reload_animation_return(self):
+        # return to normal position + rotation
+        self.animate_position(
+            self.position - Vec3(0, 0.35, -0.1), duration=0.15, curve=curve.in_out_quad)
+        self.animate_rotation(self.rotation - Vec3(-10, 0, 5),
+                              duration=0.15, curve=curve.in_out_quad)
+
     # ---------------------------
     # RELOAD
     # ---------------------------
+
     def reload(self):
         if self.reloading:
             return
@@ -92,6 +111,20 @@ class Gun(Entity):
 
         self.reloading = True
         reload_sound.play()
+
+        # --- RELOAD ANIMATION ---
+    # Move gun Up + tilt
+        self.animate_position(
+            self.position + Vec3(0, 0.35, -0.1), duration=0.18, curve=curve.in_out_quad)
+        self.animate_rotation(self.rotation + Vec3(-10, 0, 5),
+                              duration=0.18, curve=curve.in_out_quad)
+
+    # After animation → return gun to original pose
+        # timing matches reload time
+        invoke(self._reload_animation_return, delay=2)
+
+    # Finish reload logic
+        invoke(self._finish_reload, delay=1.2)
 
         # Delay to simulate reload animation (1.2 sec)
         invoke(self._finish_reload, delay=1.2)
@@ -164,7 +197,7 @@ class Gun(Entity):
 shootables_parent = Entity()
 mouse.traverse_target = shootables_parent
 
-# --- Gun / Ammo Sounds ---
+# --- Ammo ---
 
 
 def update_ammo_ui():
@@ -174,12 +207,15 @@ def update_ammo_ui():
 # --- Gun / Ammo Sounds ---
 empty_click = Audio('empty_bullet.mp3', volume=5, autoplay=False)
 reload_sound = Audio('mag-reload-81594.mp3', volume=5, autoplay=False)
+pickup_sound = Audio('take-it-90781.mp3', autoplay=False, volume=1)
 
 # --- Player Sounds ---
 walk = Audio('walking-sound-effect.mp3', volume=1, autoplay=False, loop=False)
 jump_sound = Audio('jumplanding.mp3', volume=1, autoplay=False, loop=False)
 hit_sound = Audio('080998_bullet-hit-39870.mp3',
                   volume=0.6, autoplay=False, loop=False)
+pickup_sound = Audio('take-it-90781.mp3', autoplay=False, volume=1)
+
 
 # --- Ground ---
 ground = Entity(
@@ -210,7 +246,13 @@ ammo_text = Text(
     origin=(0, 0),
     color=color.white
 )
-
+player_hp_text = Text(
+    text="HP: 100",
+    origin=(0, 0),
+    position=(0.70, 0.45),
+    scale=2,
+    color=color.red
+)
 # --- Trees ---
 trees = []
 for pos in [(39, 0, 39), (-39, 0, -39), (39, 0, -39), (-39, 0, 39)]:
@@ -319,7 +361,6 @@ for i in range(25):
         color=color.hsv(0, 0, random.uniform(.9, 1))
     )
 
-
 player = FirstPersonController(speed=PLAYER_SPEED, position=(0, 0, -30))
 player.cursor.visible = True
 editor_camera = EditorCamera(enabled=False, ignore_paused=True)
@@ -337,22 +378,27 @@ gun = Gun()
 
 was_on_ground = player.grounded
 
-
 # ======================================================
 #  ENEMY CLASS
 # ======================================================
+
+
 class Enemy(Entity):
     def __init__(self, **kwargs):
         super().__init__(
             parent=shootables_parent,
-            position=pos,
-            model='gnawty_-_donkey_kong_64_enemy.glb',
-            scale_y=.9,
-            origin_y=-.54,
+            model='egg_drone.glb',
+            scale_y=1,
+            origin_y=-2,
             color=color.light_gray,
+            scale=(1, 1, 1),
             collider='box',
             **kwargs
         )
+
+        self.collider = BoxCollider(
+            self, center=Vec3(0, 1, 0), size=Vec3(1, 2, 1))
+
         self.health_bar = Entity(
             parent=self,
             y=3,
@@ -360,27 +406,39 @@ class Enemy(Entity):
             color=color.red,
             world_scale=(.1, .1, .1)
         )
+
         self.max_hp = 100
         self._hp = self.max_hp
         self.hp = self.max_hp
+
         self.destroyed = False
+        self.attack_cooldown = 0
 
     def update(self):
         if self.destroyed:
             return
 
-        dist = distance_xz(player.position, self.position)
-        if dist > BLOCK_UPDATE_DISTANCE:
-            return
+        dist = distance(self.position, player.position)
 
-        self.health_bar.alpha = max(0, self.health_bar.alpha - time.dt)
-        self.look_at_2d(player.position, 'y')
+        # --- SAFE MOVE ---
+        if dist > 1.4:
+            self.look_at_2d(player.position, axis='y')
+            self.position += self.forward * time.dt * 1.3
+        else:
+            self.look_at_2d(player.position, axis='y')
 
-        hit_info = raycast(self.world_position + Vec3(0, 1, 0),
-                           self.forward, 30, ignore=(self,))
-        if hit_info.entity == player:
-            if dist > 2:
-                self.position += self.forward * time.dt * 3
+        # --- SAFE ATTACK ---
+        if dist < 1.4:
+            if self.attack_cooldown <= 0:
+                player.hp -= 10
+                update_player_hp()
+                hit_sound.play()
+                self.attack_cooldown = 1
+            else:
+                self.attack_cooldown -= time.dt
+
+        # ALWAYS update HP bar
+        self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
 
     @property
     def hp(self):
@@ -403,19 +461,35 @@ class Enemy(Entity):
             self.collider = None
             self.enabled = False
             destroy(self, delay=.05)
-        self.health_bar.world_scale_x = self.hp / self.max_hp * 1.5
+
+        self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
         self.health_bar.alpha = 1
 
 
 # Spawn Enemies
+enemies = [Enemy(position=(x * -5, 0, 46)) for x in range(4)]
+random.shuffle(enemies)
 
-# Spawn Enemies
-enemies = [Enemy(x=x * 4) for x in range(4)]
 
+# ======================================================
+
+
+class AmmoBox(Entity):
+    def __init__(self, amount=30, **kwargs):
+        super().__init__(
+            model='ammo_box_-_game_asset.glb',
+            color=color.azure,
+            scale=1,
+            collider='box',
+            **kwargs
+        )
+        self.amount = amount
+        ammo_pickups.append(self)
 
 # ======================================================
 #  UPDATE LOOP
 # ======================================================
+
 
 def update():
     for i, block in enumerate(blocks):
@@ -456,10 +530,56 @@ def update():
     if held_keys['left mouse'] and not gun.reloading:
         gun.shoot()
 
+        # ---- Ammo pickup ----
+    for box in ammo_pickups[:]:
+        if distance(player.position, box.position) < 2:
 
-# ======================================================
+            # add ammo
+            gun.reserve += box.amount
+
+            # update UI if you use it
+            try:
+                ammo_text.text = f"{gun.mag} / {gun.reserve}"
+            except:
+                pass
+
+            # play sound
+            try:
+                pickup_sound.play()
+            except:
+                print("take-it-90781.mp3")
+
+            # destroy box and remove from list
+            destroy(box)
+            ammo_pickups.remove(box)
+
+
+# --- Player HP System ---
+player.max_hp = 100
+player.hp = 100
+
+
+def update_player_hp():
+    player_hp_text.text = f"HP: {int(player.hp)}"
+
+
+# --- Player HP System ---
+player.max_hp = 100
+player.hp = 100
+
+
+def update_player_hp():
+    player_hp_text.text = f"HP: {int(player.hp)}"
+    if player.hp <= 0:
+        player.hp = 0
+        Text("YOU DIED", scale=5, color=color.red, origin=(0, 0))
+        application.pause()
+        destroy(player)
+
 #  PAUSE
 # ======================================================
+
+
 def pause_input(key):
     if key == 'tab':
         editor_camera.enabled = not editor_camera.enabled
