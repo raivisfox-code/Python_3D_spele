@@ -2,10 +2,13 @@ from ursina.prefabs.health_bar import HealthBar
 import random
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
-
+import random
+import math
 
 app = Ursina()
 ammo_pickups = []
+shootables_parent = Entity()
+
 
 # Configuration
 WALL_HEIGHT = 8
@@ -17,21 +20,28 @@ BLOCK_UPDATE_DISTANCE = 50
 random.seed(0)
 window.vsync = True
 
+# =====================================================
+# PLAYER
+# =====================================================
+player = FirstPersonController(speed=PLAYER_SPEED, position=(0, 0, -30))
+player.cursor.visible = True
 
 # ======================================================
 #  DAMAGE FLOATING TEXT
 # ======================================================
+
+
 class DamageText(Text):
     def __init__(self, value, position):
         super().__init__(
             text=f"-{value}",
             color=color.red,
             position=position,
-            scale=10,
-            origin=(8, 8),
+            scale=2,  # smaller scale
+            origin=(0, 0),  # center origin
             world_parent=scene
         )
-        self.animate_position(self.position + Vec3(1, 1, 1), duration=1)
+        self.animate_position(self.position + Vec3(0, 1, 0), duration=1)
         self.fade_out(duration=1)
         destroy(self, delay=1.1)
 
@@ -52,7 +62,6 @@ class Gun(Entity):
             flip_faces=True,
             **kwargs
         )
-
         # === Shooting system ===
         self.on_cooldown = False
         self.cooldown_time = 0.12
@@ -68,11 +77,12 @@ class Gun(Entity):
         # Barrel offset
         self.barrel_offset = Vec3(1.5, 3.7, 5.5)
 
+        # Replace quad with .glb muzzle flash
         self.muzzle_flash = Entity(
             parent=self,
-            model='quad',
+            model='muzzle_meshes.glb',  # .glb file here
             color=color.yellow,
-            world_scale=0.03,
+            scale=0.001,                # adjust scale as needed
             enabled=False,
             position=self.barrel_offset
         )
@@ -187,7 +197,7 @@ class Gun(Entity):
 shootables_parent = Entity()
 mouse.traverse_target = shootables_parent
 
-# --- Gun / Ammo Sounds ---
+# --- Ammo ---
 
 
 def update_ammo_ui():
@@ -236,7 +246,13 @@ ammo_text = Text(
     origin=(0, 0),
     color=color.white
 )
-
+player_hp_text = Text(
+    text="HP: 100",
+    origin=(0, 0),
+    position=(0.70, 0.45),
+    scale=2,
+    color=color.red
+)
 # --- Trees ---
 trees = []
 for pos in [(39, 0, 39), (-39, 0, -39), (39, 0, -39), (-39, 0, 39)]:
@@ -345,7 +361,6 @@ for i in range(25):
         color=color.hsv(0, 0, random.uniform(.9, 1))
     )
 
-
 player = FirstPersonController(speed=PLAYER_SPEED, position=(0, 0, -30))
 player.cursor.visible = True
 editor_camera = EditorCamera(enabled=False, ignore_paused=True)
@@ -363,22 +378,27 @@ gun = Gun()
 
 was_on_ground = player.grounded
 
-
 # ======================================================
 #  ENEMY CLASS
 # ======================================================
+
+
 class Enemy(Entity):
     def __init__(self, **kwargs):
         super().__init__(
             parent=shootables_parent,
-            position=pos,
-            model='gnawty_-_donkey_kong_64_enemy.glb',
-            scale_y=.9,
-            origin_y=-.54,
+            model='egg_drone.glb',
+            scale_y=1,
+            origin_y=-2,
             color=color.light_gray,
+            scale=(1, 1, 1),
             collider='box',
             **kwargs
         )
+
+        self.collider = BoxCollider(
+            self, center=Vec3(0, 1, 0), size=Vec3(1, 2, 1))
+
         self.health_bar = Entity(
             parent=self,
             y=3,
@@ -386,27 +406,39 @@ class Enemy(Entity):
             color=color.red,
             world_scale=(.1, .1, .1)
         )
+
         self.max_hp = 100
         self._hp = self.max_hp
         self.hp = self.max_hp
+
         self.destroyed = False
+        self.attack_cooldown = 0
 
     def update(self):
         if self.destroyed:
             return
 
-        dist = distance_xz(player.position, self.position)
-        if dist > BLOCK_UPDATE_DISTANCE:
-            return
+        dist = distance(self.position, player.position)
 
-        self.health_bar.alpha = max(0, self.health_bar.alpha - time.dt)
-        self.look_at_2d(player.position, 'y')
+        # --- SAFE MOVE ---
+        if dist > 1.4:
+            self.look_at_2d(player.position, axis='y')
+            self.position += self.forward * time.dt * 1.3
+        else:
+            self.look_at_2d(player.position, axis='y')
 
-        hit_info = raycast(self.world_position + Vec3(0, 1, 0),
-                           self.forward, 30, ignore=(self,))
-        if hit_info.entity == player:
-            if dist > 2:
-                self.position += self.forward * time.dt * 3
+        # --- SAFE ATTACK ---
+        if dist < 1.4:
+            if self.attack_cooldown <= 0:
+                player.hp -= 10
+                update_player_hp()
+                hit_sound.play()
+                self.attack_cooldown = 1
+            else:
+                self.attack_cooldown -= time.dt
+
+        # ALWAYS update HP bar
+        self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
 
     @property
     def hp(self):
@@ -429,12 +461,15 @@ class Enemy(Entity):
             self.collider = None
             self.enabled = False
             destroy(self, delay=.05)
-        self.health_bar.world_scale_x = self.hp / self.max_hp * 1.5
+
+        self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
         self.health_bar.alpha = 1
 
 
 # Spawn Enemies
-enemies = [Enemy(x=x * 4) for x in range(4)]
+enemies = [Enemy(position=(x * -5, 0, 46)) for x in range(4)]
+random.shuffle(enemies)
+
 
 # ======================================================
 
@@ -518,14 +553,33 @@ def update():
             destroy(box)
             ammo_pickups.remove(box)
 
-# Inside the house
-AmmoBox(position=(-46, 0, -22), amount=120)
-AmmoBox(position=(-46, 0, -28), amount=120)
+
+# --- Player HP System ---
+player.max_hp = 100
+player.hp = 100
 
 
+def update_player_hp():
+    player_hp_text.text = f"HP: {int(player.hp)}"
+
+
+# --- Player HP System ---
+player.max_hp = 100
+player.hp = 100
+
+
+def update_player_hp():
+    player_hp_text.text = f"HP: {int(player.hp)}"
+    if player.hp <= 0:
+        player.hp = 0
+        Text("YOU DIED", scale=5, color=color.red, origin=(0, 0))
+        application.pause()
+        destroy(player)
+
+#  PAUSE
 # ======================================================
-#  PAUSEw
-# ======================================================
+
+
 def pause_input(key):
     if key == 'tab':
         editor_camera.enabled = not editor_camera.enabled
