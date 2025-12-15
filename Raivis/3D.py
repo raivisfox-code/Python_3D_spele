@@ -4,6 +4,7 @@ from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import random
 import math
+import os
 
 
 app = Ursina()
@@ -26,6 +27,7 @@ window.vsync = True
 # =====================================================
 player = FirstPersonController(speed=PLAYER_SPEED, position=(0, 0, -30))
 player.cursor.visible = True
+
 
 # ======================================================
 #  DAMAGE FLOATING TEXT
@@ -70,7 +72,7 @@ class Gun(Entity):
 
         self.mag_size = 30        # bullets per mag
         self.mag = self.mag_size  # current mag
-        self.reserve = 60       # bullets left in inventory
+        self.reserve = 120       # bullets left in inventory
         self.reloading = False
 
         self._orig_rotation_z = self.rotation_z
@@ -78,12 +80,12 @@ class Gun(Entity):
         # Barrel offset
         self.barrel_offset = Vec3(1.5, 3.7, 5.5)
 
-        # Replace quad with .glb muzzle flash
+        # muzzle flash
         self.muzzle_flash = Entity(
             parent=self,
-            model='muzzle_meshes.glb',  # .glb file here
+            model='muzzle_meshes.glb',
             color=color.yellow,
-            scale=0.001,                # adjust scale as needed
+            scale=0.003,                # adjust scale as needed
             enabled=False,
             position=self.barrel_offset
         )
@@ -197,9 +199,28 @@ class Gun(Entity):
         update_ammo_ui()
         print(f"Picked up {amount} ammo! Reserve = {self.reserve}")
 
+###  HIGH SCORE SAVE/LOAD  ###
 
-# ======================================================
-#  WORLD ENTITIES
+
+SCORE_FILE = "highscore.txt"
+save_high_score = "Raivis"
+
+
+def load_high_score():
+    if os.path.exists(SCORE_FILE):
+        with open(SCORE_FILE, "r") as f:
+            try:
+                return int(f.read())
+            except:
+                return 0
+    return 0
+
+
+def save_high_score(value):
+    with open(SCORE_FILE, "w") as f:
+        f.write(str(value))
+
+
 # ======================================================
 shootables_parent = Entity()
 mouse.traverse_target = shootables_parent
@@ -268,6 +289,25 @@ controls_text = Text(
     scale=1,
     color=color.white
 )
+score = 0
+high_score = load_high_score()
+
+score_text = Text(
+    text="Score: 0",
+    origin=(0, 0),
+    position=(0.70, 0.40),
+    scale=2,
+    color=color.yellow
+)
+high_score_text = Text(
+    text=f"High Score: {high_score}",
+    origin=(0, 0),
+    position=(0.70, 0.35),
+    scale=1.8,
+    color=color.orange
+)
+
+
 # --- Trees ---
 trees = []
 for pos in [(39, 0, 39), (-39, 0, -39), (39, 0, -39), (-39, 0, 39)]:
@@ -390,13 +430,11 @@ skybox = Entity(
 )
 
 gun = Gun()
-
 was_on_ground = player.grounded
 
 # ======================================================
 #  ENEMY CLASS
 # ======================================================
-
 
 class Enemy(Entity):
     def __init__(self, speed_multiplier=1.0, **kwargs):
@@ -411,47 +449,108 @@ class Enemy(Entity):
             **kwargs
         )
 
+        # AI
+        self.vision_range = 10
+        self.attack_range = 2.2
+        self.state = "patrol"
+        self.patrol_speed = 2.0
+        self.chase_speed = 4.0
+        self.patrol_target = self._get_new_patrol_point()
+
+        # Combat
+        self.attack_damage = 15
+        self.attack_cooldown_time = 1.2
+        self._cooldown_timer = 0
+
+        # HP
+        self.max_hp = 100
+        self._hp = self.max_hp
+        self.destroyed = False
+
+        # Health bar
         self.health_bar = Entity(
             parent=self,
             y=3,
             model='cube',
             color=color.red,
-            world_scale=(.1, .1, .1)
+            world_scale=(1.5, 0.1, 0.1)
         )
-
-        self.max_hp = 100
-        self._hp = self.max_hp
-        self.hp = self.max_hp
-
-        self.destroyed = False
-        self.attack_cooldown = 0
-        self.speed_multiplier = speed_multiplier
 
     def update(self):
         if self.destroyed:
             return
 
-        dist = distance(self.position, player.position)
+        # determine state
+        can_see = self._can_see_player()
+        dist = distance(Vec3(self.x, 0, self.z), Vec3(player.x, 0, player.z))
 
-        # --- SAFE MOVE ---
-        if dist > 1.4:
-            self.look_at_2d(player.position, axis='y')
-            self.position += self.forward * time.dt * 1.3 * self.speed_multiplier
+        if can_see and dist <= self.attack_range:
+            self.state = "attack"
+        elif can_see:
+            self.state = "chase"
         else:
+            self.state = "patrol"
+
+        # execute state
+        if self.state == "patrol":
+            self._patrol()
+        elif self.state == "chase":
+            self._chase_player()
+        elif self.state == "attack":
             self.look_at_2d(player.position, axis='y')
+            self._attack_player()
 
-        # --- SAFE ATTACK ---
-        if dist < 1.4:
-            if self.attack_cooldown <= 0:
-                player.hp -= 10
-                update_player_hp()
-                hit_sound.play()
-                self.attack_cooldown = 1
-            else:
-                self.attack_cooldown -= time.dt
+        # update health bar
+        self.health_bar.world_scale_x = max(0, (self.hp / self.max_hp) * 1.5)
 
-        # ALWAYS update HP bar
-        self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
+    def _can_see_player(self):
+        if distance(self.position, player.position) > self.vision_range:
+            return False
+
+        hit = raycast(
+            self.world_position + Vec3(0, 1.5, 0),
+            (player.world_position - self.world_position).normalized(),
+            distance=self.vision_range,
+            ignore=(self,)
+        )
+        # player ir redzams, ja hit.entity == player
+        return hit.hit and hit.entity == player
+
+    def _patrol(self):
+        self.look_at_2d(self.patrol_target, axis='y')
+        hit = raycast(self.world_position + Vec3(0, 1, 0), self.forward, distance=1.2, ignore=(self,))
+        if hit.hit:
+            self.patrol_target = self._get_new_patrol_point()
+            return
+        self.position += self.forward * time.dt * self.patrol_speed
+        if distance(self.position, self.patrol_target) < 1:
+            self.patrol_target = self._get_new_patrol_point()
+
+    def _get_new_patrol_point(self):
+        for _ in range(10):
+            point = Vec3(random.uniform(-45, 45), self.y, random.uniform(-45, 45))
+            hit = raycast(point + Vec3(0, 5, 0), Vec3(0, -1, 0), distance=10, ignore=(self,))
+            if hit.hit:
+                return point
+        return self.position
+
+    def _chase_player(self):
+        self.look_at_2d(player.position, axis='y')
+        self.position += self.forward * time.dt * self.chase_speed
+
+    def _attack_player(self):
+        if self._cooldown_timer > 0:
+            self._cooldown_timer -= time.dt
+            return
+
+        if distance(Vec3(self.x, 0, self.z), Vec3(player.x, 0, player.z)) > self.attack_range:
+            return
+
+        self._cooldown_timer = self.attack_cooldown_time
+        if hasattr(player, "hp"):
+            player.hp -= self.attack_damage
+            update_player_hp()
+            hit_sound.play()
 
     @property
     def hp(self):
@@ -464,38 +563,18 @@ class Enemy(Entity):
 
         if damage > 0:
             DamageText(damage, self.world_position + Vec3(0, 2.5, 0))
-            original_color = self.color
             self.color = color.white
-            hit_sound.play()
-            invoke(lambda: setattr(self, 'color', original_color), delay=0.1)
+            invoke(lambda: setattr(self, 'color', color.light_gray), delay=0.1)
 
-        if value <= 0:
+        if self._hp <= 0 and not self.destroyed:
             self.destroyed = True
-            self.collider = None
-            self.enabled = False
-            destroy(self, delay=.05)
-
-            # Spawn 2 more enemies with increased speed
-            spawn_new_enemies = [
-                Enemy(position=self.position + Vec3(random.uniform(-12, 12), 0, random.uniform(-12, 12)),
-                      speed_multiplier=self.speed_multiplier + 0.8),
-                Enemy(position=self.position + Vec3(random.uniform(-12, 12), 0, random.uniform(-12, 12)),
-                      speed_multiplier=self.speed_multiplier + 0.8)
-            ]
-            enemies.extend(spawn_new_enemies)
-
-        self.health_bar.world_scale_x = (self.hp / self.max_hp) * 1.5
-        self.health_bar.alpha = 1
+            update_score(100)
+            destroy(self)
 
 
-# Spawn Enemies
-enemies = [Enemy(position=(random.uniform(-40, 40), 0,
-                 random.uniform(30, 46))) for x in range(4)]
-
-
-# ======================================================
+# ========================
 class AmmoBox(Entity):
-    def __init__(self, amount=120, **kwargs):
+       def __init__(self, amount=120, **kwargs):
         super().__init__(
             model='ammo_box_-_game_asset.glb',
             color=color.white,
@@ -512,6 +591,18 @@ b = AmmoBox(position=(49, 8, 50))
 a = AmmoBox(position=(-49, 8, 50))
 ammo_pickups.append(b)
 ammo_pickups.append(a)
+
+enemies = []
+
+for i in range(5):
+    e = Enemy(
+        position=(
+            random.uniform(-30, 30),
+            0,
+            random.uniform(-30, 30)
+        )
+    )
+    enemies.append(e)
 
 
 # ======================================================
@@ -570,27 +661,33 @@ def update():
         gun.shoot()
 
 
-# --- Player HP System ---
-player.max_hp = 100
-player.hp = 100
-
-
 def update_player_hp():
     player_hp_text.text = f"HP: {int(player.hp)}"
 
 
-# --- Player HP System ---
+def update_score(amount):
+    global score, high_score
+    score += amount
+    score_text.text = f"Score: {score}"
+
+    if score > high_score:
+        high_score = score
+        high_score_text.text = f"High Score: {high_score}"
+        save_high_score(high_score)
+
+
 player.max_hp = 100
 player.hp = 100
 
 
-def update_player_hp():
-    player_hp_text.text = f"HP: {int(player.hp)}"
-    if player.hp <= 0:
-        player.hp = 0
-        Text("YOU DIED", scale=5, color=color.red, origin=(0, 0))
-        application.pause()
-        destroy(player)
+if player.hp <= 0:
+    if score > high_score:
+        save_high_score(score)
+
+    player.hp = 0
+    Text("YOU DIED", scale=5, color=color.red, origin=(0, 0))
+    application.pause()
+    destroy(player)
 
 
 #  PAUSE
