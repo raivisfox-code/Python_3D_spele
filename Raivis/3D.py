@@ -203,7 +203,6 @@ class Gun(Entity):
 
 
 SCORE_FILE = "highscore.txt"
-save_high_score = "Raivis"
 
 
 def load_high_score():
